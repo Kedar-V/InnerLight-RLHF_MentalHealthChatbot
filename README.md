@@ -2,6 +2,27 @@
 
 > A comprehensive system for building efficient, high-quality mental health chatbots using Supervised Fine-Tuning (SFT) and Reinforcement Learning from Human Feedback (RLHF).
 
+## 🧩 Problem Statement
+
+Building safe, helpful, and efficient mental-health conversational agents presents several core challenges:
+- Data scarcity: high-quality, domain-specific labeled dialogues are expensive and sensitive.
+- Safety and alignment: responses must prioritize user safety, avoid harmful suggestions, and surface crisis resources correctly.
+- Deployment constraints: models must be small and fast enough for low-latency production while preserving helpfulness.
+
+## 🎯 Objective
+
+This repository aims to provide reproducible, production-ready pipelines to train compact student models that:
+- Achieve high subjective quality and safety levels comparable to large teacher models.
+- Fit tight memory and latency budgets for deployment (e.g., <3GB RAM for the runtime model).
+- Allow experimenters to choose between supervised LoRA, reward-style teacher transfer, and principled KL-based distillation depending on data and compute availability.
+
+## 💡 Motivation
+
+Why multiple approaches? Mental-health assistants require a balance of accuracy, safety, and efficiency. Different teams have different constraints:
+- If you have labeled human-curated dialogues, supervised fine-tuning with LoRA is straightforward and reliable.
+- If you have access to a high-quality teacher model but few labels, you can transfer behavior using teacher-derived rewards or distribution matching.
+- KL-based distillation offers a middle path: it preserves probabilistic teacher behavior and is often more stable and sample-efficient than raw RL updates.
+
 ## 🎯 Overview
 
 InnerLight provides **two complementary training approaches** for mental health chatbots:
@@ -18,38 +39,69 @@ InnerLight provides **two complementary training approaches** for mental health 
 
 ---
 
-## 🚀 Quick Start
+## 🧩 Problem Statement
 
-### Installation
-```bash
-pip install torch transformers peft bitsandbytes accelerate datasets
-python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
-```
+Building safe, helpful, and efficient mental-health conversational agents presents several core challenges:
+- Data scarcity: high-quality, domain-specific labeled dialogues are expensive and sensitive.
+- Safety and alignment: responses must prioritize user safety, avoid harmful suggestions, and surface crisis resources correctly.
+- Deployment constraints: models must be small and fast enough for low-latency production while preserving helpfulness.
 
-### Train SFT Pipeline (2-4 hours)
-```bash
-python train.py                    # 5-stage training
-python inference.py                # Interactive demo
-```
+## 🎯 Objective
 
-### Train RLHF Pipeline (4-6 hours)
-```bash
-python rlhf_train.py              # Complete 8-stage training
-```
+This repository aims to provide reproducible, production-ready pipelines to train compact student models that:
+- Achieve high subjective quality and safety levels comparable to large teacher models.
+- Fit tight memory and latency budgets for deployment (e.g., <3GB RAM for the runtime model).
+- Allow experimenters to choose between supervised LoRA, reward-style teacher transfer, and principled KL-based distillation depending on data and compute availability.
 
-### Quick Inference
-```python
-# SFT
-from src.inference import process_user_input
-response = process_user_input("I'm feeling anxious")
+## 💡 Motivation
 
-# RLHF
-from rlhf.inference import RLHFInference
-model = RLHFInference(student_model_path="...", base_model_name="Qwen/Qwen1.5-0.5B")
-response = model.generate_response("I'm feeling anxious")
-```
+Why multiple approaches? Mental-health assistants require a balance of accuracy, safety, and efficiency. Different teams have different constraints:
+- If you have labeled human-curated dialogues, supervised fine-tuning with LoRA is straightforward and reliable.
+- If you have access to a high-quality teacher model but few labels, you can transfer behavior using teacher-derived rewards or distribution matching.
+- KL-based distillation offers a middle path: it preserves probabilistic teacher behavior and is often more stable and sample-efficient than raw RL updates.
 
----
+## 🛠️ Training Strategies (Detailed)
+
+Below are the primary strategies implemented or demonstrated in this repo. Each section describes the objective, typical loss, implementation notes, and practical tips.
+
+1) LoRA (Supervised Fine-Tuning)
+- Objective: Fit the student to labeled (prompt → response) examples using cross-entropy while only updating low-rank adapter parameters.
+- Loss: Cross-entropy between student token probabilities and ground-truth tokens.
+- Implementation notes: Use the `peft` package to attach LoRA adapters (r, alpha tunable). Fine-tune with standard teacher-forced MLE. Merge adapters for deployment.
+- Practical tips: Use teacher-forced sampling for training, monitor perplexity and response-level metrics (BLEU, ROUGE are less informative for chat — prefer human-style ratings or safety classifiers).
+
+2) Teacher-only RL (Teacher-guided Reinforcement-style Transfer)
+- Objective: Encourage the student to produce outputs that the teacher prefers or ranks higher, using reward-weighted or policy-gradient updates without human preference labels.
+- Loss: Policy-gradient variants like REINFORCE with teacher-derived reward signals (e.g., logit-difference scores, safety filter scores, or teacher scoring functions).
+- Implementation notes: Requires sampling from the student policy, computing teacher score or preference, computing advantage (normalize per-batch), and applying an advantage-weighted log-prob loss. Use reward clipping and baselines to stabilize training.
+- Practical tips: Keep batch sizes and reward normalization stable; use KL penalties or trust-region style constraints to avoid policy collapse.
+
+3) KL-based RLHF / Distribution Matching (our `rlhf/kl_rlhf.py`)
+- Objective: Directly align the student distribution to the teacher's soft distribution by minimizing per-token KL divergence (temperature-scaled).
+- Loss: KL(π_student(T) || π_teacher(T)) = sum p_teacher log(p_teacher / p_student), implemented via student log-probs and teacher probabilities with optional temperature scaling and a multiplicative KL coefficient.
+- Implementation notes: Teacher logits must be computed (on-the-fly or cached). Training is stable because it optimizes a proper divergence and avoids noisy reward estimates.
+- Practical tips: Start with temperature T in [1.0, 3.0], KL coefficient α in [0.5, 2.0]. If teacher compute is constrained, precompute and cache teacher logits as offline distillation datasets.
+
+4) Policy Gradient (Preference & Reward Model based RLHF)
+- Objective: Use a learned reward model (trained on human preferences) to optimize student outputs via policy-gradient updates that increase expected reward.
+- Loss: Negative expected reward approximated by sampled rollouts: L ≈ -Eπ[R]. Often combined with baseline subtraction and KL penalties to the reference policy.
+- Implementation notes: This is the classic RLHF setup: (1) collect comparisons, (2) train reward model, (3) RL-optimize policy. Requires careful stability engineering (reward model calibration, PPO/DPO choices).
+- Practical tips: Use small policy update steps, clipping or KL-penalties, and robust normalization of rewards.
+
+5) Direct Preference Optimization (DPO)
+- Objective: Learn directly from pairwise preference data by optimizing a logistic-type objective that contrasts chosen vs rejected responses.
+- Loss: L = -log σ(β × (logπ(chosen) - logπ(rejected))) per pair.
+- Implementation notes: DPO removes an explicit reward model and trains the policy to prefer chosen responses. It can be more stable and simpler to scale in some setups.
+- Practical tips: Provide high-quality pairwise data and tune β; DPO often complements policy-gradient experiments.
+
+6) Knowledge Distillation (Mixture of KL + CE)
+- Objective: Combine teacher soft targets (KL) with supervised labels (cross-entropy) when ground-truth targets exist.
+- Loss: α KL(π_student || π_teacher) + (1-α) CE(π_student, y)
+- Implementation notes: Useful when a small labeled dataset exists and you also have teacher logits. It blends direct supervision with distributional mimicry.
+
+## 🔍 Detailed Comparison (expanded)
+
+We provide a concise comparison later in this file under **"⚖️ Method Comparison"**. The detailed strategy sections above explain trade-offs and practical recommendations; use the short comparison for quick decisions and the detailed sections for engineering choices.
 
 ## 📁 Project Structure
 
@@ -432,6 +484,41 @@ See **QUICK_REFERENCE.py** Section 11 for more troubleshooting.
 - [Qwen Models](https://huggingface.co/Qwen)
 
 ---
+
+## ⚖️ Method Comparison: LoRA vs Teacher-only RL vs KL-based RLHF
+
+This project supports multiple approaches to adapt models for mental-health conversational agents. Below is a concise comparison to help choose the right method for your needs.
+
+- **LoRA (Parameter-Efficient Fine-Tuning)**
+  - **What:** Injects low-rank adapters into a pre-trained model and fine-tunes these adapters instead of the full model.
+  - **Training Loss:** Standard supervised cross-entropy on labeled (prompt, response) pairs.
+  - **Pros:** Very memory-efficient (only adapter weights learned), simple to train (SFT workflows), reliable convergence on supervised data, easy to merge and deploy.
+  - **Cons:** Requires labeled targets and may not capture preference-based improvements from large teacher models.
+  - **When to use:** You have quality labeled dialogues and want a small, fast model with minimal engineering overhead.
+
+- **Teacher-only RL (RL using Teacher Outputs / Reward-Free Distillation)**
+  - **What:** Uses outputs or scores from a large teacher model to construct rewards or supervise student updates via reinforcement-style objectives (policy gradient or reward-weighted updates) but relies primarily on teacher outputs rather than human preferences.
+  - **Training Loss:** Policy-gradient style losses or advantage-weighted updates derived from teacher scoring; often not directly minimizing distributional divergence.
+  - **Pros:** Leverages strong teacher behavior to improve student responses; can be applied where preference labels are scarce; can improve desirable behaviors encoded in teacher outputs.
+  - **Cons:** RL-style training can be unstable, needs careful reward shaping/normalization, and may require many samples. Because it optimizes for teacher outputs rather than distributional matching, it can drift if rewards are imperfect.
+  - **When to use:** You want to transfer specific teacher behaviors (e.g., safety filters, response styles) and you are comfortable tuning RL hyperparameters.
+
+- **KL-based RLHF (KL Divergence between Teacher & Student Distributions)**
+  - **What:** Directly matches the student output distribution to the teacher's soft distribution using a KL divergence loss (temperature-scaled), optionally combined with other objectives.
+  - **Training Loss:** KL(π_student || π_teacher) computed per-token (teacher logits are treated as soft targets). Our implementation is in `rlhf/kl_rlhf.py`.
+  - **Pros:** Stable, principled distribution-matching; often more sample-efficient than pure RL; avoids expensive preference labeling while retaining teacher behavior; reduces tendency to overfit to single teacher argmax choices.
+  - **Cons:** Requires running the teacher to obtain logits (memory/compute heavy during training if teacher is large), and can inherit teacher biases. Temperature and KL coefficient hyperparameters need tuning.
+  - **When to use:** You have access to a high-quality teacher model and want stable, effective transfer of the teacher's probabilistic behavior into a small student model.
+
+Summary guidance:
+- For minimal engineering and labeled data: choose **LoRA / SFT**.
+- For capturing procedural or behavioral outputs from a teacher where preference labels are missing: **Teacher-only RL** may help, but expect more tuning.
+- For stable, sample-efficient knowledge transfer that mimics teacher distributions: prefer **KL-based RLHF** (see `rlhf/kl_rlhf.py`).
+
+Hyperparameter notes:
+- Tune temperature T (teacher softening) and KL coefficient α carefully. Typical starts: `T=1.0-3.0`, `α=0.5-2.0`.
+- If teacher memory is a bottleneck, consider caching teacher logits or generating distillation datasets offline.
+
 
 ## ✅ Checklist: Before Production
 
